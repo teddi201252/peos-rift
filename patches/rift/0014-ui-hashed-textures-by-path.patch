@@ -1,0 +1,66 @@
+A layout texture found by its WAD path hash (0013) is read from its own
+full path: UiTextures::get() looks a name up relative to the WAD folders,
+and the absolute path 0013 passed was never found there, so every such
+texture (the HUD's panels: player frame, ability bar, shop) "did not
+load". The first loaded ones and the misses, with the reason, to stderr.
+
+--- a/src/renderNew/ui.cpp
++++ b/src/renderNew/ui.cpp
+@@ -359,18 +359,52 @@
+     if (const auto found = cache_.find(asset_path); found != cache_.end()) return found->second;
+     if (asset_path[0] == '#') {
+         // A WAD path hash: the file it names, as its own path (cached under both)
++        // The file is read from its own full path: get() looks a name up
++        // relative to the WAD folders, and an absolute one was never found
++        // there (every such texture "did not load", 2026-11-16).
+         const std::filesystem::path file = hashedFile(asset_path);
+-        const GLuint texture = file.empty() ? 0 : get(file.generic_string());
++        GLuint texture = 0;
++        std::string why = "is no file of the WADs";
++        if (!file.empty()) {
++            why = "did not load: " + file.generic_string();
++            try {
++                const auto bytes = fmt::read_file(file);
++                fmt::TexInfo info;
++                const std::string extension = lowercase(file.extension().string());
++                Texture loaded;
++                if (isStbImage(extension)) {
++                    loaded = upload_image(bytes, &info);
++                } else {
++                    std::vector<std::byte> converted;
++                    const bool legacy_dds = extension == ".dds" && fmt::dds_legacy_to_bgra8(bytes, converted);
++                    const auto mips = extension == ".dds"
++                                          ? fmt::dds_mip_views(legacy_dds ? std::span<const std::byte>(converted)
++                                                                          : std::span<const std::byte>(bytes), info)
++                                          : fmt::tex_mip_views(bytes, info);
++                    loaded = uploadTexture(info, mips, TextureColorSpace::Linear);
++                }
++                texture = loaded.get();
++                if (texture) {
++                    size_[asset_path] = {int(info.w), int(info.h)};
++                    owned_.push_back(std::move(loaded));
++                    setLinearClampSampling(texture);
++                    ++loaded_;
++                }
++            } catch (const std::exception& e) {
++                why += std::string(" (") + e.what() + ")";
++            }
++        }
+         if (!texture) {
+             static int said = 0;
+-            if (said++ < 8)
+-                std::fprintf(stderr, "ui textures: %s %s\n", asset_path.c_str(),
+-                             file.empty() ? "is no file of the WADs" : ("did not load: " + file.generic_string()).c_str());
++            if (said++ < 8) std::fprintf(stderr, "ui textures: %s %s\n", asset_path.c_str(), why.c_str());
+             ++missing_;
+             if (missing_names_.size() < 32) missing_names_.push_back(asset_path);
++        } else {
++            static int loaded_said = 0;
++            if (loaded_said++ < 4)
++                std::fprintf(stderr, "ui textures: %s -> %s\n", asset_path.c_str(), file.generic_string().c_str());
+         }
+         cache_.emplace(asset_path, texture);
+-        if (texture) size_[asset_path] = size(file.generic_string());
+         return texture;
+     }
+ 

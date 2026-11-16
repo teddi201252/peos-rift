@@ -1,0 +1,17 @@
+--- a/src/renderNew/font.cpp
++++ b/src/renderNew/font.cpp
+@@ -1015,7 +1015,14 @@
+     return !(value && value[0] == '0');
+ }
+ 
++#if defined(__peos__)
++// PeOS: the working folder is / and the app may not write there; its own
++// folder in /starlight/config instead (without it every start baked the
++// fonts again, ~12 s a set on the MacBook).
++fs::path cacheDir() { return fs::path("/starlight/config/rift/cache") / "fonts"; }
++#else
+ fs::path cacheDir() { return fs::path("cache") / "fonts"; }
++#endif
+ 
+ struct CacheKeyHasher {
+     uint64_t hash = kFnvOffset;

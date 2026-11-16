@@ -1,0 +1,218 @@
+The newer .ltk atlas maps ("IMAA": hashes, no paths) and layouts whose
+TextureName is a file hash (a WadChunkLink): the sprites keyed
+"#<xxh64>", the atlases named uiautoatlas/<the .ltk without .ltk>/atlas_<n>.tex
+(checked against their hash; all 240 .ltk of UI.wad in the 2026 data).
+Without it every .ltk failed ("autoatlas: zla liczba atlasow") and the HUD
+panels had no background (2026-11-15). Not only PeOS: these are the data.
+
+--- a/src/fmt/interface/tooltip.h
++++ b/src/fmt/interface/tooltip.h
+@@ -164,7 +164,14 @@
+ 
+ using AtlasSpriteMap = std::unordered_map<std::string, AtlasSprite>;
+ 
+-AtlasSpriteMap parse_autoatlas(std::span<const std::byte> file);
++// The .ltk's own path (as under its WAD, or a full path through "<x>.wad/")
++// names the atlases of the newer binary "IMAA" maps, which keep only hashes:
++// their sprites are keyed "#<xxh64 of the image path, 16 hex digits>", the
++// key a layout gets for a TextureName that is a file hash (wad_link_key).
++AtlasSpriteMap parse_autoatlas(std::span<const std::byte> file, std::string_view ltk_path = {});
++
++// The key of a texture given as a file hash (a WadChunkLink): "#" + 16 hex digits.
++std::string wad_link_key(u64 hash);
+ 
+ // Every CSSSheet of `ux/fonts.ltk.bin` by object path; layout text elements pick theirs via `HTMLStyleSheet`.
+ using TooltipStylesheets = std::unordered_map<u32, TooltipStylesheet>;
+--- a/src/fmt/interface/tooltip.cpp
++++ b/src/fmt/interface/tooltip.cpp
+@@ -5,6 +5,9 @@
+ #include "fmt/gameplay/items.h"
+ #include "fmt/gameplay/detail/bin_readers.h"
+ 
++#define XXH_INLINE_ALL   // as wad.cpp and xpa.cpp: no library to link
++#include <xxhash.h>
++
+ #include <algorithm>
+ #include <cmath>
+ #include <cstdio>
+@@ -575,7 +578,75 @@
+ }
+ }
+ 
+-AtlasSpriteMap parse_autoatlas(std::span<const std::byte> file) {
++std::string wad_link_key(u64 hash) {
++    char key[20];
++    std::snprintf(key, sizeof key, "#%016llx", static_cast<unsigned long long>(hash));
++    return key;
++}
++
++namespace {
++// The newer .ltk ("IMAA"): u32 atlas count, a u64 path hash per atlas, u32
++// sprite count, then per sprite u64 image hash, f32 u0 v0 u1 v1, u32 atlas.
++// An atlas is "uiautoatlas/<the .ltk's path without .ltk>/atlas_<n>.tex",
++// which its hash (xxh64 of the lowercase path, as WAD names) confirms.
++AtlasSpriteMap parse_imaa(std::span<const std::byte> file, std::string_view ltk_path) {
++    std::string stem = normalizeAssetKey(ltk_path);
++    if (const size_t wad = stem.find(".wad/"); wad != std::string::npos)
++        stem.erase(0, wad + 5);   // under the WAD
++    if (stem.size() > 4 && stem.compare(stem.size() - 4, 4, ".ltk") == 0)
++        stem.resize(stem.size() - 4);
++    if (stem.empty())
++        throw ParseError("IMAA: the .ltk's path is needed to name its atlases");
++
++    Reader reader(file);
++    (void)reader.get<u32>();   // "IMAA"
++    const u32 atlas_count = reader.get<u32>();
++    if (atlas_count == 0 || atlas_count > 64)
++        throw ParseError("IMAA: zla liczba atlasow");
++    std::vector<std::string> atlases;
++    for (u32 index = 0; index < atlas_count; ++index) {
++        const u64 hash = reader.get<u64>();
++        std::string found;
++        for (u32 n = 0; n < 64 && found.empty(); ++n) {
++            const std::string candidate = "uiautoatlas/" + stem + "/atlas_" + std::to_string(n) + ".tex";
++            if (XXH64(candidate.data(), candidate.size(), 0) == hash)
++                found = candidate;
++        }
++        if (found.empty())
++            throw ParseError("IMAA: no atlas name for its hash");
++        atlases.push_back(std::move(found));
++    }
++    const u32 sprite_count = reader.get<u32>();
++    if (sprite_count > 100000)
++        throw ParseError("IMAA: zla liczba sprite'ow");
++    AtlasSpriteMap result;
++    result.reserve(sprite_count);
++    for (u32 sprite_index = 0; sprite_index < sprite_count; ++sprite_index) {
++        const u64 image = reader.get<u64>();
++        AtlasSprite sprite;
++        sprite.u0 = reader.get<float>();
++        sprite.v0 = reader.get<float>();
++        sprite.u1 = reader.get<float>();
++        sprite.v1 = reader.get<float>();
++        const u32 atlas = reader.get<u32>();
++        if (atlas >= atlases.size())
++            throw ParseError("IMAA: atlas index out of range");
++        if (!std::isfinite(sprite.u0) || !std::isfinite(sprite.v0) || !std::isfinite(sprite.u1) ||
++            !std::isfinite(sprite.v1) || sprite.u0 < 0.f || sprite.v0 < 0.f || sprite.u1 > 1.f ||
++            sprite.v1 > 1.f || sprite.u1 <= sprite.u0 || sprite.v1 <= sprite.v0)
++            throw ParseError("IMAA: zly prostokat UV");
++        sprite.texture = atlases[atlas];
++        result.emplace(wad_link_key(image), std::move(sprite));
++    }
++    if (reader.remaining() != 0)
++        throw ParseError("IMAA: data past the end of the table");
++    return result;
++}
++}
++
++AtlasSpriteMap parse_autoatlas(std::span<const std::byte> file, std::string_view ltk_path) {
++    if (file.size() >= 8 && std::memcmp(file.data(), "IMAA", 4) == 0)
++        return parse_imaa(file, ltk_path);
+     Reader reader(file);
+     const i32 atlas_count = reader.get<i32>();
+     if (atlas_count < 0 || atlas_count > 64)
+--- a/src/fmt/interface/uilayout.cpp
++++ b/src/fmt/interface/uilayout.cpp
+@@ -9,6 +9,7 @@
+ #include "fmt/core/bin_get.h"
+ #include "fmt/core/hash.h"
+ #include "fmt/gameplay/detail/bin_readers.h"
++#include "fmt/interface/tooltip.h"
+ 
+ namespace fmt {
+ 
+@@ -1202,11 +1203,20 @@
+ }
+ 
+ // Preserve loose textures, atlas coordinates and the separate slice borders.
++// A texture named by its path, or (newer layouts) by the path's hash, a
++// WadChunkLink: then the key the newer "IMAA" atlas maps give their sprites.
++std::string elementTextureName(const BinFile& bin, std::span<const BinNode> properties, u32 field) {
++    if (const std::string_view text = get_string(bin, properties, field); !text.empty())
++        return std::string(text);
++    if (const BinNode* node = get(properties, field); node && node->type == BinType::WadChunkLink && node->integer_value)
++        return wad_link_key(u64(node->integer_value));
++    return {};
++}
++
+ void readElementTexture(const BinFile& bin, std::span<const BinNode> object_properties, UiElement& element) {
+     for (u32 field : {kTextureName2, kTexturePath}) {
+-        const std::string_view text = get_string(bin, object_properties, field);
+-        if (!text.empty()) {
+-            element.texture.assign(text);
++        if (std::string name = elementTextureName(bin, object_properties, field); !name.empty()) {
++            element.texture = std::move(name);
+             break;
+         }
+     }
+@@ -1216,8 +1226,8 @@
+     if (!texture_properties.empty()) {
+ 
+         for (u32 fieldHash : {kTextureName, kTextureName2, kTexturePath})
+-            if (const std::string_view text = get_string(bin, texture_properties, fieldHash); !text.empty()) {
+-                element.texture.assign(text);
++            if (std::string name = elementTextureName(bin, texture_properties, fieldHash); !name.empty()) {
++                element.texture = std::move(name);
+                 break;
+             }
+         const float atlas_width = float(get_integer(texture_properties, kAtlasW, 0));
+--- a/src/client/ui/hud/hud.cpp
++++ b/src/client/ui/hud/hud.cpp
+@@ -458,7 +458,7 @@
+         const fs::path path = assets / "UI.wad" / ltk;
+         if (!fmt::vfs::is_file(path)) continue;
+         try {
+-            for (auto& [src, sprite] : fmt::parse_autoatlas(fmt::read_file(path)))
++            for (auto& [src, sprite] : fmt::parse_autoatlas(fmt::read_file(path), ltk))
+                 ui_atlas_.emplace(src, sprite);
+         } catch (const std::exception& exception) {
+             LOG_WARN(logging::Category::Ui, "atlas {}: {}", ltk, exception.what());
+@@ -472,7 +472,8 @@
+             const fs::path path = assets / "UI.wad/ux/fonts/css" / atlas_map;
+             if (!fmt::vfs::is_file(path)) continue;
+             try {
+-                for (auto& [source, sprite] : fmt::parse_autoatlas(fmt::read_file(path))) {
++                for (auto& [source, sprite] :
++                     fmt::parse_autoatlas(fmt::read_file(path), std::string("ux/fonts/css/") + atlas_map)) {
+                     auto size = atlas_sizes.find(sprite.texture);
+                     if (size == atlas_sizes.end()) {
+                         const auto bytes = fmt::read_file(assets / "UI.wad" / sprite.texture);
+@@ -1163,7 +1164,7 @@
+         const fs::path atlas_info = assets / "Global.wad/assets/items/icons2d/autoatlas/largeicons/atlas_info.bin";
+         if (fmt::vfs::is_file(atlas_info)) {
+             try {
+-                const fmt::AtlasSpriteMap large = fmt::parse_autoatlas(fmt::read_file(atlas_info));
++                const fmt::AtlasSpriteMap large = fmt::parse_autoatlas(fmt::read_file(atlas_info), atlas_info.generic_string());
+                 for (const auto& [id, path] : item_icons_) {
+                     const size_t name_start = path.find_last_of('/') + 1;
+                     const size_t name_end = path.find_last_of('.');
+@@ -1674,6 +1675,7 @@
+             return texture;
+         }
+     }
++    if (key[0] == '#') return 0;   // a file hash (newer layouts) no atlas has: not a path to load
+     return tex_->get(path);
+ }
+ 
+--- a/src/client/ui/hud/hud_tft.cpp
++++ b/src/client/ui/hud/hud_tft.cpp
+@@ -4105,7 +4105,7 @@
+         for (const auto& entry : fmt::vfs::list(assets / kUxTft)) {
+             if (!entry.is_regular_file() || entry.path().extension() != ".ltk") continue;
+             try {
+-                for (auto& [src, sprite] : fmt::parse_autoatlas(fmt::read_file(entry.path()))) {
++                for (auto& [src, sprite] : fmt::parse_autoatlas(fmt::read_file(entry.path()), entry.path().generic_string())) {
+                     ui_atlas_.emplace(src, sprite);
+                     ++count;
+                 }
+@@ -4193,7 +4193,8 @@
+         ui.trait_card = fmt::parse_ui_layout(trait_card_bin, fonts_p);
+         ++stats_.layouts;
+         for (auto& [src, sprite] :
+-             fmt::parse_autoatlas(fmt::read_file(assets / "UI.wad/clientstates/tftcommon/ux/tfttraitinfocard.ltk")))
++             fmt::parse_autoatlas(fmt::read_file(assets / "UI.wad/clientstates/tftcommon/ux/tfttraitinfocard.ltk"),
++                                  "clientstates/tftcommon/ux/tfttraitinfocard.ltk"))
+             ui_atlas_.emplace(src, sprite);
+     } catch (const std::exception& exception) {
+         LOG_ERROR(logging::Category::Core, "TFT HUD: tfttraitinfocard - {}", exception.what());

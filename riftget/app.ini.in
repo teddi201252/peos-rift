@@ -1,0 +1,17 @@
+# Starlight app bundle: riftget, Rift Ascend's files from the PC to an
+# installed PeOS (/rift and /apps/rift.app; see userland/progs/riftget.c).
+# userland/ports/rift/build.sh riftget writes app.ini from this, @ARGS@
+# replaced by the PC's base URL. network: the download; fs: the files;
+# debug: the kernel's numbers (dropped frames, CPU) at the end.
+title=Rift Get
+category=strumenti
+exec=./app.bin
+args=@ARGS@
+capabilities=network, debug, fs.read, fs.write
+paths=/system/apps/riftget.app:r, /apps:rw, /rift:rw
+icon=res:icon
+width=640
+height=420
+
+[resources]
+icon=./resources/icon.png

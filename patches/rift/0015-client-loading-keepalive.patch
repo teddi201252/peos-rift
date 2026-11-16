@@ -1,0 +1,192 @@
+While the match loads, the client services the network from a thread of
+its own whenever the loading has not polled for 100 ms. One loading step
+can take 20 s on a slow disk (a champion with its forms on the MacBook):
+with no acknowledgements ENet on the server doubled its resend waits to
+tens of seconds, and when the server shortened the player's timeout at
+the end of the loading it dropped the player at once (2 s into the
+match, 2026-11-16). Packets wait in ENet's queue for poll(); every use of
+the host is under one mutex. Any server, unchanged, keeps the player.
+
+--- a/src/client/main.cpp
++++ b/src/client/main.cpp
+@@ -932,6 +932,7 @@
+     const float map_bounds_padding = options.cinematic ? 1.0e6f : 3000.f;
+ 
+     const double load_start = glfwGetTime();
++    network_client.startLoadingKeepalive();   // PeOS port: acknowledgements during long steps
+     float last_logged_percentage = -1.f;
+     const char* last_logged_stage = "";
+     const auto reportLoadingStage = [&](float progress, const char* what) {
+@@ -5722,6 +5723,7 @@
+         applyVolumeSettings(sound, settings);
+         std::printf("load     %.1f s (warmup %d frames, %.1f s)\n", double(loading.elapsed()), warmup_frames,
+                     glfwGetTime() - warmup_started_at);
++        network_client.stopLoadingKeepalive();
+         LOG_INFO(logging::Category::Asset, "LOAD completed in {:.1f}s, warmup {} frames in {:.1f}s",
+                  double(loading.elapsed()), warmup_frames, glfwGetTime() - warmup_started_at);
+     };
+--- a/src/client/network/netclient.h
++++ b/src/client/network/netclient.h
+@@ -1,12 +1,15 @@
+ #pragma once
+ #include <algorithm>
+ #include <array>
++#include <atomic>
+ #include <chrono>
+ #include <cstdint>
+ #include <deque>
+ #include <functional>
++#include <mutex>
+ #include <string>
+ #include <string_view>
++#include <thread>
+ #include <unordered_map>
+ #include <utility>
+ #include <vector>
+@@ -190,6 +193,13 @@
+     // Runs while connect() waits for the server (keeps the window alive); returning false cancels the wait.
+     void setConnectWait(std::function<bool()> keep_waiting) { connect_wait_ = std::move(keep_waiting); }
+     void poll();
++    // While the match loads: the network serviced from a thread of its own
++    // whenever the loading has not polled for a while (one step can take
++    // 20 s on a slow disk), so acknowledgements keep going out and the
++    // server's resend waits stay short; packets wait for poll(). The PeOS
++    // port: any server, unchanged, keeps the player.
++    void startLoadingKeepalive();
++    void stopLoadingKeepalive();
+ 
+     void tickReconnect(float dt);
+     bool connectionLost() const { return lost_; }
+@@ -637,6 +647,11 @@
+     void handlePacket(uint8_t channel, const uint8_t* data, size_t len);
+ 
+     _ENetHost* host_ = nullptr;
++    std::recursive_mutex enet_mutex_;              // host_ and peer_, with the keepalive thread
++    std::thread keepalive_thread_;
++    std::atomic<bool> keepalive_run_{false};
++    std::atomic<int64_t> last_poll_ns_{0};
++    uint64_t keepalive_services_ = 0;
+     _ENetPeer* peer_ = nullptr;
+     bool connected_ = false;
+     bool in_match_ = false;
+--- a/src/client/network/netclient.cpp
++++ b/src/client/network/netclient.cpp
+@@ -54,12 +54,16 @@
+ 
+ }
+ 
+-NetClient::~NetClient() { disconnect(); }
++NetClient::~NetClient() {
++    stopLoadingKeepalive();
++    disconnect();
++}
+ 
+ bool NetClient::connect(const std::string& host, uint16_t port, const std::string& name,
+                         const std::string& champion, const std::string& auth_token,
+                         const std::string& loadout_token, uint8_t spell1, uint8_t spell2,
+                         uint8_t skin, uint8_t position, const net::RunePage& runes, uint16_t icon) {
++    std::lock_guard<std::recursive_mutex> enet_lock(enet_mutex_);
+     args_ = ConnectArgs{host,   port,   name,     champion, auth_token, loadout_token,
+                         spell1, spell2, skin,     position, runes,      icon};
+     if (enet_initialize() != 0) {
+@@ -127,6 +131,7 @@
+ }
+ 
+ bool NetClient::openPeer() {
++    std::lock_guard<std::recursive_mutex> enet_lock(enet_mutex_);
+     skin_claims_.forgetChallenge();
+     host_ = enet_host_create(nullptr, 1, net::CH_COUNT, 0, 0);
+     if (!host_) {
+@@ -156,6 +161,7 @@
+ }
+ 
+ void NetClient::sendHandshake() {
++    std::lock_guard<std::recursive_mutex> enet_lock(enet_mutex_);
+     connected_ = true;
+     if (loading_wanted_ >= 100)
+         enet_peer_timeout(peer_, 0, 15000, 30000);
+@@ -196,6 +202,7 @@
+ }
+ 
+ void NetClient::tickReconnect(float dt) {
++    std::lock_guard<std::recursive_mutex> enet_lock(enet_mutex_);
+     if (!lost_ || reconnect_rejected_ || reconnect_pending_) return;
+     reconnect_in_ -= dt;
+     if (reconnect_in_ > 0.f) return;
+@@ -216,6 +223,7 @@
+ }
+ 
+ void NetClient::disconnect() {
++    std::lock_guard<std::recursive_mutex> enet_lock(enet_mutex_);
+     commitOrders();
+     if (host_) {
+         std::string per_op;
+@@ -1557,6 +1565,7 @@
+ }
+ 
+ void NetClient::commitOrders() {
++    std::lock_guard<std::recursive_mutex> enet_lock(enet_mutex_);
+     if (staged_orders_.empty()) return;
+     std::stable_sort(staged_orders_.begin(), staged_orders_.end(),
+                      [](const StagedOrder& left, const StagedOrder& right) {
+@@ -1573,6 +1582,9 @@
+ }
+ 
+ void NetClient::poll() {
++    std::lock_guard<std::recursive_mutex> enet_lock(enet_mutex_);
++    last_poll_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(
++        std::chrono::steady_clock::now().time_since_epoch()).count();
+     commitOrders();
+     if (!host_) return;
+     ENetEvent event;
+@@ -2078,6 +2090,7 @@
+ }
+ 
+ void NetClient::sendLoadingProgress(uint8_t percent) {
++    std::lock_guard<std::recursive_mutex> enet_lock(enet_mutex_);
+     loading_wanted_ = std::max(loading_wanted_, percent);
+     if (!peer_ || !in_match_ || peer_->state != ENET_PEER_STATE_CONNECTED) return;
+     if (percent == last_loading_sent_) return;
+@@ -2268,6 +2281,7 @@
+ 
+ #if LOLCLONE_DEV
+ void NetClient::sendDebugSimCtl(uint8_t cmd, uint32_t arg) {
++    std::lock_guard<std::recursive_mutex> enet_lock(enet_mutex_);
+     if (!peer_) return;
+     net::Writer writer(net::OP_DEBUG_SIM_CTL);
+     writer.u8(cmd);
+@@ -2285,6 +2299,34 @@
+     if (!peer_) return 0u;
+     const uint32_t last = peer_->lastRoundTripTime;
+     return last > 0u ? last : peer_->roundTripTime;
++}
++
++void NetClient::startLoadingKeepalive() {
++    if (keepalive_thread_.joinable()) return;
++    keepalive_services_ = 0;
++    last_poll_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(
++        std::chrono::steady_clock::now().time_since_epoch()).count();
++    keepalive_run_ = true;
++    keepalive_thread_ = std::thread([this] {
++        while (keepalive_run_.load()) {
++            std::this_thread::sleep_for(std::chrono::milliseconds(50));
++            const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
++                std::chrono::steady_clock::now().time_since_epoch()).count();
++            if (now - last_poll_ns_.load() < 100000000) continue;   // the loading polls by itself
++            std::lock_guard<std::recursive_mutex> enet_lock(enet_mutex_);
++            if (!host_) continue;
++            enet_host_service(host_, nullptr, 0);   // acknowledgements out, packets queued for poll()
++            ++keepalive_services_;
++        }
++    });
+ }
+ 
++void NetClient::stopLoadingKeepalive() {
++    if (!keepalive_thread_.joinable()) return;
++    keepalive_run_ = false;
++    keepalive_thread_.join();
++    LOG_INFO(logging::Category::Net, "loading keepalive: the network serviced {} times while the loading was busy",
++             keepalive_services_);
+ }
++
++}  // namespace netc

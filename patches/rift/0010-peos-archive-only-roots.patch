@@ -1,0 +1,139 @@
+PeOS: under an asset root of archives only, a path no archive has is
+missing, without looking for it on the disk (exists/is_file/is_directory,
+read_file, materialize, disk_path). Each such lookup walked the folders
+through the disk: 820,000 disk reads every 10 s of a 550 s load on the
+MacBook Pro 2019 (2026-11-15).
+
+--- a/src/fmt/archive/vfs.cpp
++++ b/src/fmt/archive/vfs.cpp
+@@ -44,6 +44,14 @@
+ std::unordered_map<std::string, ArchiveMount> g_mounts;
+ std::vector<std::string> g_mount_roots;
+ std::unordered_map<std::string, std::vector<WadOverlay>> g_wad_overlays;
++#if defined(__peos__)
++// PeOS: asset roots that hold only archives (no loose <Name>.wad folder). A
++// path under one that no archive has is missing: it is not looked for on the
++// disk, where every exists() of a missing file (and of each of its prefixes,
++// disk_path) walked the folders through the disk: 820,000 disk reads every
++// 10 s, most of a 550 s load on the MacBook (2026-11-15).
++std::vector<std::string> g_archive_only_roots;
++#endif
+ 
+ std::mutex g_trace_mutex;
+ std::atomic<bool> g_tracing{false};
+@@ -349,6 +357,27 @@
+         }
+     }
+ 
++#if defined(__peos__)
++    {
++        bool loose_wad = false;
++        std::error_code scan_error;
++        for (filesystem::directory_iterator directory_iterator(root, scan_error), iterator_end;
++             !scan_error && directory_iterator != iterator_end; directory_iterator.increment(scan_error)) {
++            std::string name = directory_iterator->path().filename().string();
++            for (char& character : name)
++                if (character >= 'A' && character <= 'Z')
++                    character = char(character + ('a' - 'A'));
++            if (name.ends_with(".wad") && directory_iterator->is_directory(scan_error)) {
++                loose_wad = true;
++                break;
++            }
++        }
++        if (!archives.empty() && !loose_wad) {
++            std::unique_lock mount_lock(g_mount_mutex);
++            g_archive_only_roots.push_back(pathKey(root));
++        }
++    }
++#endif
+     std::sort(archives.begin(), archives.end(),
+               [](const ArchiveCandidate& first, const ArchiveCandidate& second) {
+                   return first.mount_key != second.mount_key ? first.mount_key < second.mount_key
+@@ -434,10 +463,28 @@
+ }
+ }
+ 
++bool archive_only(const filesystem::path& path) {
++#if defined(__peos__)
++    if (!active())
++        return false;
++    const std::string key = pathKey(path);
++    std::shared_lock mount_lock(g_mount_mutex);
++    for (const std::string& root_key : g_archive_only_roots)
++        if (key.size() > root_key.size() && key.compare(0, root_key.size(), root_key) == 0 &&
++            key[root_key.size()] == '/')
++            return true;
++#else
++    (void)path;
++#endif
++    return false;
++}
++
+ filesystem::path disk_path(const filesystem::path& path) {
+ #ifdef _WIN32
+     return path;
+ #else
++    if (archive_only(path))
++        return path;   // nothing of it on the disk: no prefix walk
+     std::error_code status_error;
+     if (path.empty() || filesystem::exists(path, status_error))
+         return path;
+@@ -480,6 +527,8 @@
+         if (kind == EntryKind::Deleted)
+             return false;
+     }
++    if (archive_only(path))
++        return false;
+     std::error_code filesystem_error;
+     return filesystem::exists(disk_path(path), filesystem_error);
+ }
+@@ -492,6 +541,8 @@
+         if (kind == EntryKind::Deleted || kind == EntryKind::Directory)
+             return false;
+     }
++    if (archive_only(path))
++        return false;
+     std::error_code filesystem_error;
+     return filesystem::is_regular_file(disk_path(path), filesystem_error);
+ }
+@@ -499,6 +550,8 @@
+ bool is_directory(const filesystem::path& path) {
+     if (active() && archiveEntryKind(path) == EntryKind::Directory)
+         return true;
++    if (archive_only(path))
++        return false;
+     std::error_code filesystem_error;
+     return filesystem::is_directory(disk_path(path), filesystem_error);
+ }
+@@ -635,6 +688,8 @@
+     if (kind == EntryKind::Deleted)
+         return {};
+     if (kind != EntryKind::File) {
++        if (archive_only(path))
++            return {};
+         const filesystem::path disk_spelling = disk_path(path);
+         return filesystem::is_regular_file(disk_spelling, filesystem_error) ? disk_spelling : filesystem::path{};
+     }
+--- a/src/fmt/archive/vfs.h
++++ b/src/fmt/archive/vfs.h
+@@ -42,6 +42,9 @@
+ bool is_directory(const std::filesystem::path& path);
+ 
+ std::filesystem::path disk_path(const std::filesystem::path& path);
++// PeOS: the path is under an asset root of archives only and so never on the
++// disk (false elsewhere, and on other systems).
++bool archive_only(const std::filesystem::path& path);
+ 
+ // Matches the directory_entry queries used by asset scanners.
+ struct Item {
+--- a/src/fmt/core/reader.h
++++ b/src/fmt/core/reader.h
+@@ -131,6 +131,8 @@
+         case vfs::Hit::Deleted:
+             throw ParseError("deleted by XPA patch: " + path.string());
+         case vfs::Hit::Missing:
++            if (vfs::archive_only(path))   // PeOS: not on the disk either
++                throw ParseError("cannot open: " + path.string());
+             vfs::note_disk_read(path);
+             break;
+         }

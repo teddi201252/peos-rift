@@ -1,0 +1,179 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 24f099fe..be46797d 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -9,6 +9,13 @@ add_library(glfw ${GLFW_LIBRARY_TYPE}
+ 
+ # The time, thread and module code is shared between all backends on a given OS,
+ # including the null backend, which still needs those bits to be functional
++if (CMAKE_SYSTEM_NAME STREQUAL "PeOS")
++    # PeOS: the Null platform's window in Starlight (peos_glfw.c)
++    target_sources(glfw PRIVATE peos_platform.h peos_glfw.c)
++    # its contexts are peos_gl's: Mesa's libGL-peos.a, with what Mesa needs
++    target_link_libraries(glfw PRIVATE GL-peos drm z m)
++endif()
++
+ if (APPLE)
+     target_sources(glfw PRIVATE macos_time.h macos_time.c posix_thread.h
+                                 posix_module.c posix_thread.c)
+diff --git a/src/null_platform.h b/src/null_platform.h
+index 548b7b49..5ec01f55 100644
+--- a/src/null_platform.h
++++ b/src/null_platform.h
+@@ -29,7 +29,12 @@
+ #define GLFW_NULL_LIBRARY_WINDOW_STATE  _GLFWlibraryNull null;
+ #define GLFW_NULL_MONITOR_STATE         _GLFWmonitorNull null;
+ 
+-#define GLFW_NULL_CONTEXT_STATE
++#if defined(__peos__)
++ // PeOS: the Null platform's window is in Starlight (peos_platform.h)
++ #include "peos_platform.h"
++#else
++ #define GLFW_NULL_CONTEXT_STATE
++#endif
+ #define GLFW_NULL_CURSOR_STATE
+ #define GLFW_NULL_LIBRARY_CONTEXT_STATE
+ 
+diff --git a/src/null_window.c b/src/null_window.c
+index 0a42d436..5c71f383 100644
+--- a/src/null_window.c
++++ b/src/null_window.c
+@@ -119,8 +119,20 @@ GLFWbool _glfwCreateWindowNull(_GLFWwindow* window,
+     if (!createNativeWindow(window, wndconfig, fbconfig))
+         return GLFW_FALSE;
+ 
++#if defined(__peos__)
++    _glfwPeOSWindowCreated(window);
++#endif
++
+     if (ctxconfig->client != GLFW_NO_API)
+     {
++#if defined(__peos__)
++        if (ctxconfig->source == GLFW_NATIVE_CONTEXT_API)
++        {
++            if (!_glfwCreateContextPeOS(window, ctxconfig, fbconfig))
++                return GLFW_FALSE;
++        }
++        else
++#endif
+         if (ctxconfig->source == GLFW_NATIVE_CONTEXT_API ||
+             ctxconfig->source == GLFW_OSMESA_CONTEXT_API)
+         {
+@@ -168,6 +180,9 @@ GLFWbool _glfwCreateWindowNull(_GLFWwindow* window,
+ 
+ void _glfwDestroyWindowNull(_GLFWwindow* window)
+ {
++#if defined(__peos__)
++    _glfwPeOSWindowDestroyed(window);
++#endif
+     if (window->monitor)
+         releaseMonitor(window);
+ 
+@@ -487,14 +502,23 @@ GLFWbool _glfwWindowVisibleNull(_GLFWwindow* window)
+ 
+ void _glfwPollEventsNull(void)
+ {
++#if defined(__peos__)
++    _glfwPeOSPump(0.0);
++#endif
+ }
+ 
+ void _glfwWaitEventsNull(void)
+ {
++#if defined(__peos__)
++    _glfwPeOSPump(-1.0);
++#endif
+ }
+ 
+ void _glfwWaitEventsTimeoutNull(double timeout)
+ {
++#if defined(__peos__)
++    _glfwPeOSPump(timeout);
++#endif
+ }
+ 
+ void _glfwPostEmptyEventNull(void)
+@@ -517,12 +541,18 @@ void _glfwSetCursorPosNull(_GLFWwindow* window, double x, double y)
+ 
+ void _glfwSetCursorModeNull(_GLFWwindow* window, int mode)
+ {
++#if defined(__peos__)
++    _glfwPeOSSetCursorMode(window, mode);
++#endif
+ }
+ 
+ GLFWbool _glfwCreateCursorNull(_GLFWcursor* cursor,
+                                const GLFWimage* image,
+                                int xhot, int yhot)
+ {
++#if defined(__peos__)
++    _glfwPeOSCreateCursor(cursor, image, xhot, yhot);
++#endif
+     return GLFW_TRUE;
+ }
+ 
+@@ -533,14 +563,23 @@ GLFWbool _glfwCreateStandardCursorNull(_GLFWcursor* cursor, int shape)
+ 
+ void _glfwDestroyCursorNull(_GLFWcursor* cursor)
+ {
++#if defined(__peos__)
++    _glfwPeOSDestroyCursor(cursor);
++#endif
+ }
+ 
+ void _glfwSetCursorNull(_GLFWwindow* window, _GLFWcursor* cursor)
+ {
++#if defined(__peos__)
++    _glfwPeOSSetCursor(window, cursor);
++#endif
+ }
+ 
+ void _glfwSetClipboardStringNull(const char* string)
+ {
++#if defined(__peos__)
++    _glfwPeOSSetClipboardString(string);
++#endif
+     char* copy = _glfw_strdup(string);
+     _glfw_free(_glfw.null.clipboardString);
+     _glfw.null.clipboardString = copy;
+@@ -548,6 +587,9 @@ void _glfwSetClipboardStringNull(const char* string)
+ 
+ const char* _glfwGetClipboardStringNull(void)
+ {
++#if defined(__peos__)
++    _glfwPeOSGetClipboardString();
++#endif
+     return _glfw.null.clipboardString;
+ }
+ 
+diff --git a/src/platform.c b/src/platform.c
+index 9055c33d..e6de7ffc 100644
+--- a/src/platform.c
++++ b/src/platform.c
+@@ -74,6 +74,12 @@ GLFWbool _glfwSelectPlatform(int desiredID, _GLFWplatform* platform)
+         return GLFW_FALSE;
+     }
+ 
++#if defined(__peos__)
++    // PeOS: the Null platform is the one (its window in Starlight)
++    if (desiredID == GLFW_ANY_PLATFORM)
++        desiredID = GLFW_PLATFORM_NULL;
++#endif
++
+     // Only allow the Null platform if specifically requested
+     if (desiredID == GLFW_PLATFORM_NULL)
+         return _glfwConnectNull(desiredID, platform);
+diff --git a/src/platform.h b/src/platform.h
+index 6cd8d45f..58bbe558 100644
+--- a/src/platform.h
++++ b/src/platform.h
+@@ -158,7 +158,8 @@
+ #define GLFW_PLATFORM_CONTEXT_STATE \
+         GLFW_WGL_CONTEXT_STATE \
+         GLFW_NSGL_CONTEXT_STATE \
+-        GLFW_GLX_CONTEXT_STATE
++        GLFW_GLX_CONTEXT_STATE \
++        GLFW_NULL_CONTEXT_STATE
+ 
+ #define GLFW_PLATFORM_LIBRARY_CONTEXT_STATE \
+         GLFW_WGL_LIBRARY_CONTEXT_STATE \

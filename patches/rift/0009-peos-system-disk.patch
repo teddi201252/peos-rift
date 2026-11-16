@@ -1,0 +1,51 @@
+--- a/src/core/paths.cpp
++++ b/src/core/paths.cpp
+@@ -128,12 +128,20 @@
+ }
+ 
+ #if defined(__peos__)
+-// PeOS: the game's files on a disk of the user's (a stick, an external disk),
+-// mounted as /media1 ... /media9: the first with league-assets/Global.wad
++// PeOS: where the game's files may be. /rift on the system's own disk (an
++// installed PeOS: copied there once, as XPA archives), then a disk of the
++// user's (a stick, an external disk) mounted as /media1 ... /media9.
++std::vector<fs::path> peosDataRoots() {
++    std::vector<fs::path> roots{fs::path("/rift")};
++    for (int n = 1; n <= 9; ++n) roots.push_back(fs::path("/media" + std::to_string(n)));
++    return roots;
++}
++
++// The first with league-assets/Global.wad (loose files or an XPA archive).
+ fs::path peosMediaAssets() {
+     std::error_code error;
+-    for (int n = 1; n <= 9; ++n) {
+-        const fs::path candidate = fs::path("/media" + std::to_string(n)) / "league-assets";
++    for (const fs::path& root : peosDataRoots()) {
++        const fs::path candidate = root / "league-assets";
+         if (fs::exists(candidate / "Global.wad", error) || fs::exists(candidate / "Global.wad.xpa", error))
+             return candidate;
+     }
+@@ -148,7 +156,8 @@
+                              executableDirectoryOrCurrent() / "league-assets", "Global.wad");
+ #if defined(__peos__)
+         if (found.source == "compiled-in")
+-            if (fs::path media = peosMediaAssets(); !media.empty()) found = {media, "a disk (/mediaN)"};
++            if (fs::path media = peosMediaAssets(); !media.empty())
++                found = {media, media.parent_path() == "/rift" ? "the system's disk (/rift)" : "a disk (/mediaN)"};
+ #endif
+         return found;
+     }();
+@@ -165,10 +174,10 @@
+         // at most 1024 files: they do not fit in the app's bundle there)
+         if (found.source == "compiled-in") {
+             std::error_code error;
+-            for (int n = 1; n <= 9; ++n) {
+-                const fs::path candidate = fs::path("/media" + std::to_string(n)) / "rift-data";
++            for (const fs::path& root : peosDataRoots()) {
++                const fs::path candidate = root / "rift-data";
+                 if (fs::exists(candidate / "scripts/items", error)) {
+-                    found = {candidate, "a disk (/mediaN)"};
++                    found = {candidate, root == "/rift" ? "the system's disk (/rift)" : "a disk (/mediaN)"};
+                     break;
+                 }
+             }

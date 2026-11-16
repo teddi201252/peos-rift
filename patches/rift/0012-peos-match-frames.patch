@@ -1,0 +1,37 @@
+PeOS: four frames of the match (20 s in, then every 30 s) as PNGs in the
+log folder (--log-dir), so the logs show what the screen showed: the
+MacBook has no screen capture, and the HUD there could not be described.
+
+--- a/src/client/main.cpp
++++ b/src/client/main.cpp
+@@ -11767,6 +11767,30 @@
+             }
+         })
+ 
++#if defined(__peos__)
++        // PeOS: what the screen shows, for whoever reads the logs (no screen
++        // capture on the machine): a few frames of the match in the log folder.
++        {
++            static const double shots_start = glfwGetTime();
++            static int shots_done = 0;
++            constexpr int kShots = 4;
++            constexpr double kFirstAfter = 20.0, kEvery = 30.0;
++            if (shots_done < kShots && glfwGetTime() - shots_start >= kFirstAfter + kEvery * shots_done) {
++                int shot_width = 0, shot_height = 0;
++                client::visibleFramebufferSize(window, &shot_width, &shot_height);
++                glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
++                glReadBuffer(GL_BACK);
++                const std::string shot_path = log_directory + "/shot_" + std::to_string(++shots_done) + ".png";
++                const double shot_t0 = glfwGetTime();
++                if (writeFramebufferPng(shot_path, shot_width, shot_height, true))
++                    LOG_INFO(logging::Category::Core, "PeOS: frame {}x{} in {} ({:.0f} ms)", shot_width, shot_height,
++                             shot_path, (glfwGetTime() - shot_t0) * 1000.0);
++                else
++                    LOG_WARN(logging::Category::Core, "PeOS: cannot write {}", shot_path);
++            }
++        }
++#endif
++
+         DEV_ONLY({
+             static const char* moveSchedule = std::getenv("LOL_LIVE_MOVE");
+             if (moveSchedule && *moveSchedule && network_client.connected()) {

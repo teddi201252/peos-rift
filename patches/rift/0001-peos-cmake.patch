@@ -1,0 +1,70 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 0a05db3..1ef5bf4 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -35,7 +35,9 @@ if(NOT WIN32)
+     find_package(Threads REQUIRED)
+     find_package(OpenSSL 3.0 REQUIRED COMPONENTS Crypto SSL)
+     find_package(Freetype REQUIRED)
+-    find_package(CURL REQUIRED)
++    if(NOT CMAKE_SYSTEM_NAME STREQUAL "PeOS")   # PeOS: CURL is for the platform's updater only
++        find_package(CURL REQUIRED)
++    endif()
+ endif()
+ 
+ set(CMAKE_CXX_STANDARD 20)
+@@ -102,7 +104,10 @@ foreach(platform_source ${RIFT_PLATFORM_SOURCES})
+         set(RIFT_PLATFORM_PRESENT OFF)
+     endif()
+ endforeach()
+-if(RIFT_PLATFORM_PRESENT)
++if(CMAKE_SYSTEM_NAME STREQUAL "PeOS")
++    # PeOS: the client only; the platform, the server and the launcher run elsewhere
++    set(RIFT_WITH_PLATFORM OFF)
++elseif(RIFT_PLATFORM_PRESENT)
+     option(RIFT_WITH_PLATFORM "Build the platform programs and libraries" ON)
+ else()
+     set(RIFT_WITH_PLATFORM OFF)
+@@ -125,6 +130,11 @@ set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+ set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+ set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+ set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
++if(CMAKE_SYSTEM_NAME STREQUAL "PeOS")
++    # PeOS: GLFW's Null platform with its window in Starlight (no X11, no Wayland)
++    set(GLFW_BUILD_X11 OFF CACHE BOOL "" FORCE)
++    set(GLFW_BUILD_WAYLAND OFF CACHE BOOL "" FORCE)
++endif()
+ add_subdirectory(${TP}/glfw ${CMAKE_BINARY_DIR}/glfw EXCLUDE_FROM_ALL)
+ 
+ add_library(enet STATIC
+@@ -180,6 +190,16 @@ target_include_directories(core PUBLIC ${CMAKE_SOURCE_DIR}/src)
+ if(WIN32)
+     target_link_libraries(core PUBLIC devcfg bcrypt dbghelp)
+     target_link_libraries(core PUBLIC shell32)
++elseif(CMAKE_SYSTEM_NAME STREQUAL "PeOS")
++    # PeOS: no fork/exec (process.cpp), no POSIX signals (termination_signal.cpp),
++    # and no dlsym(RTLD_NEXT) for the real __cxa_throw (throw_trace.cpp): the
++    # client uses none of them
++    target_sources(core PRIVATE src/core/openssl_crypto.cpp)
++    target_link_libraries(core PUBLIC devcfg OpenSSL::Crypto Threads::Threads)
++    # and its own crash handler: no POSIX signals or ucontext (crash_peos.cpp,
++    # from userland/ports/rift/src)
++    set_source_files_properties(src/core/crash.cpp PROPERTIES HEADER_FILE_ONLY ON)
++    target_sources(core PRIVATE src/core/crash_peos.cpp)
+ else()
+     target_sources(core PRIVATE src/core/openssl_crypto.cpp src/core/termination_signal.cpp src/core/throw_trace.cpp
+         src/core/process.cpp)
+@@ -1100,6 +1120,13 @@ add_library(imgui STATIC
+ )
+ target_include_directories(imgui SYSTEM PUBLIC ${TP}/imgui)
+ target_link_libraries(imgui PUBLIC glfw)
++if(CMAKE_SYSTEM_NAME STREQUAL "PeOS")
++    # PeOS: no fork for "open in the shell"; the GL functions from glad (the
++    # client loads them through GLFW), not imgui's dlopen of libGL.so
++    target_compile_definitions(imgui PRIVATE IMGUI_DISABLE_DEFAULT_SHELL_FUNCTIONS IMGUI_IMPL_OPENGL_LOADER_CUSTOM)
++    target_link_libraries(imgui PRIVATE glad)
++    set_source_files_properties(${TP}/imgui/backends/imgui_impl_opengl3.cpp PROPERTIES COMPILE_OPTIONS "-include;glad/gl.h")
++endif()
+ if(MSVC)
+     target_compile_options(imgui PRIVATE /W0)
+ endif()

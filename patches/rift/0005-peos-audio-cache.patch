@@ -1,0 +1,16 @@
+diff --git a/src/client/main.cpp b/src/client/main.cpp
+index fe8db98..9622987 100644
+--- a/src/client/main.cpp
++++ b/src/client/main.cpp
+@@ -4888,7 +4888,11 @@ int main(int argument_count, char** argument_values) {
+         if (sound.init()) {
+             sound.setMasterVolume(1.f);
+             applyVolumeSettings(sound, settings);
++#if defined(__peos__)
++            sound.setCacheDir("/starlight/config/rift/audio-cache");   // PeOS: the bundle is read-only
++#else
+             sound.setCacheDir(core::dataDir() / "audio-cache");
++#endif
+             const filesystem::path modern_archive_root = "assets/sounds/wwise2016/sfx";
+ 
+             sound.mount(assets / "Common.wad" / modern_archive_root / "shared" / "init.bnk");

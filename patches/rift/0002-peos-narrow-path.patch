@@ -1,0 +1,13 @@
+diff --git a/src/renderNew/font.cpp b/src/renderNew/font.cpp
+index a85b46d..1b5c9b8 100644
+--- a/src/renderNew/font.cpp
++++ b/src/renderNew/font.cpp
+@@ -1879,7 +1879,7 @@ void FontAtlas::saveCache(const fs::path& file, uint64_t cacheKey, const std::ve
+ 
+     std::error_code error;
+     fs::create_directories(file.parent_path(), error);
+-    const fs::path temporary = fs::path(file).concat(L".tmp");
++    const fs::path temporary = fs::path(file).concat(".tmp");
+     FILE* output = openFile(temporary.native(), "wb");
+     if (!output) return;
+     const size_t written = std::fwrite(writer.bytes.data(), 1, writer.bytes.size(), output);

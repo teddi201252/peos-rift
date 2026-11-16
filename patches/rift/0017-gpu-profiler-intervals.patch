@@ -1,0 +1,121 @@
+From: PeOS
+Subject: [PATCH] the GPU profiler: each zone's average and worst over an interval
+
+With --prof N, every N seconds: the whole frame on the GPU (average, worst,
+frames over 30 ms) and each zone by name, then started over. The decaying
+rows before hid the slow frames (Rift Ascend on the MacBook, 2026-11-16:
+40 frames of ~90 ms in 10 s, GPU-bound).
+---
+--- a/src/renderNew/gpuprof.h
++++ b/src/renderNew/gpuprof.h
+@@ -37,7 +37,24 @@
+ 
+     void occupyGpu(int copies);
+ 
++    // PeOS: since the last call, each zone's average and worst, by name,
++    // and the whole frame on the GPU (first begin to last end): logged,
++    // then started over. The rows above decay; a 90 ms frame among 400
++    // vanished from them.
++    void logInterval(double seconds);
++
+ private:
++    struct IntervalRow {
++        const char* name = nullptr;
++        double sum = 0.0;
++        float peak = 0.f;
++        uint32_t frames = 0;
++    };
++    IntervalRow interval_[kMaxZones]{};
++    double interval_frame_sum_ = 0.0;
++    float interval_frame_peak_ = 0.f;
++    uint32_t interval_frames_ = 0, interval_over30_ = 0, interval_unread_ = 0;
++
+     GLuint occupy_source_ = 0;
+     GLuint occupy_target_ = 0;
+ 
+--- a/src/renderNew/gpuprof.cpp
++++ b/src/renderNew/gpuprof.cpp
+@@ -86,8 +86,12 @@
+     if (!last.closed) return;
+     GLuint available = 0;
+     glGetQueryObjectuiv(last.endQuery, GL_QUERY_RESULT_AVAILABLE, &available);
+-    if (!available) return;
++    if (!available) {
++        ++interval_unread_;   // PeOS: a frame not measured is said
++        return;
++    }
+ 
++    GLuint64 frameBegin = ~GLuint64(0), frameEnd = 0;
+     float total = 0.f;
+     for (size_t zoneIndex = 0; zoneIndex < zoneCount; ++zoneIndex) {
+         const Zone& zone = frames_[oldestFrame][zoneIndex];
+@@ -97,6 +101,16 @@
+         glGetQueryObjectui64v(zone.endQuery, GL_QUERY_RESULT, &endTicks);
+         if (endTicks < beginTicks) continue;
+         const float milliseconds = float(double(endTicks - beginTicks) / 1'000'000.0);
++        if (beginTicks < frameBegin) frameBegin = beginTicks;
++        if (endTicks > frameEnd) frameEnd = endTicks;
++        for (IntervalRow& interval : interval_) {
++            if (interval.name && interval.name != zone.name) continue;
++            interval.name = zone.name;
++            interval.sum += milliseconds;
++            if (milliseconds > interval.peak) interval.peak = milliseconds;
++            ++interval.frames;
++            break;
++        }
+ 
+         Row& row = rows_[zoneIndex];
+         if (row.name != zone.name) {
+@@ -112,6 +126,31 @@
+     }
+     row_count_ = zoneCount;
+     totalMilliseconds_ = totalMilliseconds_ * 0.9f + total * 0.1f;
++    if (frameEnd > frameBegin) {
++        const float frame = float(double(frameEnd - frameBegin) / 1'000'000.0);
++        interval_frame_sum_ += frame;
++        if (frame > interval_frame_peak_) interval_frame_peak_ = frame;
++        if (frame > 30.f) ++interval_over30_;
++        ++interval_frames_;
++    }
++}
++
++void GpuProfiler::logInterval(double seconds) {
++    if (!ready_) return;
++    LOG_INFO(logging::Category::Gfx,
++             "prof GPU {:.0f} s: {} frames measured ({} not), whole frame avg {:.2f} ms, worst {:.2f} ms, {} over 30 ms",
++             seconds, interval_frames_, interval_unread_,
++             interval_frames_ ? interval_frame_sum_ / interval_frames_ : 0.0, double(interval_frame_peak_),
++             interval_over30_);
++    for (IntervalRow& interval : interval_) {
++        if (!interval.name) break;
++        LOG_INFO(logging::Category::Gfx, "prof GPU   {}: avg {:.2f} ms, worst {:.2f} ms ({} frames)", interval.name,
++                 interval.frames ? interval.sum / interval.frames : 0.0, double(interval.peak), interval.frames);
++        interval = IntervalRow{};
++    }
++    interval_frame_sum_ = 0.0;
++    interval_frame_peak_ = 0.f;
++    interval_frames_ = interval_over30_ = interval_unread_ = 0;
+ }
+ 
+ }
+--- a/src/client/main.cpp
++++ b/src/client/main.cpp
+@@ -6014,14 +6014,12 @@
+         previous_time = now;
+ 
+         if (profiling_every_s > 0 && now - profiling_last >= double(profiling_every_s)) {
++            const double interval_seconds = now - profiling_last;
+             profiling_last = now;
+             prof::logTable(0.02f);
+-            size_t row_count = 0;
+-            const riotgfx::GpuProfiler::Row* rows = gpu_profiling.rows(&row_count);
+-            for (size_t index = 0; index < row_count; ++index)
+-                if (rows[index].name)
+-                    LOG_INFO(logging::Category::Gfx, "prof GPU: {} {:.3f} ms (peak {:.3f})", rows[index].name,
+-                             double(rows[index].average_milliseconds), double(rows[index].peak_milliseconds));
++            // PeOS: each GPU zone's average and worst over the interval
++            // (the decaying rows hid the slow frames)
++            gpu_profiling.logInterval(interval_seconds);
+         }
+ 
+ #if LOLCLONE_DEV

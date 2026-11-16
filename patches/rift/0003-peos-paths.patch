@@ -1,0 +1,115 @@
+diff --git a/src/core/paths.cpp b/src/core/paths.cpp
+index 7dde024..24e3e17 100644
+--- a/src/core/paths.cpp
++++ b/src/core/paths.cpp
+@@ -11,6 +11,7 @@
+ #include <utility>
+ 
+ #ifndef _WIN32
++#include <cerrno>
+ #include <cstdlib>
+ #include <fstream>
+ #include <vector>
+@@ -78,6 +79,17 @@ NativeString environmentValue(const NativeString& name) {
+     const DWORD length = GetEnvironmentVariableW(name.c_str(), value, DWORD(std::size(value)));
+     return length > 0 && length < std::size(value) ? NativeString(value, length) : NativeString();
+ }
++#elif defined(__peos__)
++// PeOS has no /proc: libpeos-compat keeps the program's arguments
++NativeString commandLineValue(const NativeString& flag) {
++    std::vector<std::string> arguments(__peos_argv, __peos_argv + __peos_argc);
++    return valueAfterFlag(arguments, arguments.size(), flag);
++}
++
++NativeString environmentValue(const NativeString& name) {
++    const char* value = std::getenv(name.c_str());
++    return value ? NativeString(value) : NativeString();
++}
+ #else
+ NativeString commandLineValue(const NativeString& flag) {
+     std::ifstream command_line("/proc/self/cmdline", std::ios::binary);
+@@ -115,16 +127,55 @@ ResolvedDirectory resolveDirectory(const char* flag, const wchar_t* variable, co
+     return {compiled, "compiled-in"};
+ }
+ 
++#if defined(__peos__)
++// PeOS: the game's files on a disk of the user's (a stick, an external disk),
++// mounted as /media1 ... /media9: the first with league-assets/Global.wad
++fs::path peosMediaAssets() {
++    std::error_code error;
++    for (int n = 1; n <= 9; ++n) {
++        const fs::path candidate = fs::path("/media" + std::to_string(n)) / "league-assets";
++        if (fs::exists(candidate / "Global.wad", error) || fs::exists(candidate / "Global.wad.xpa", error))
++            return candidate;
++    }
++    return {};
++}
++#endif
++
+ const ResolvedDirectory& assetDirectory() {
+-    static const ResolvedDirectory resolved =
+-        resolveDirectory("--assets", kAssetDirectoryVariable, LOLCLONE_ASSET_DIR,
+-                         executableDirectoryOrCurrent() / "league-assets", "Global.wad");
++    static const ResolvedDirectory resolved = [] {
++        ResolvedDirectory found =
++            resolveDirectory("--assets", kAssetDirectoryVariable, LOLCLONE_ASSET_DIR,
++                             executableDirectoryOrCurrent() / "league-assets", "Global.wad");
++#if defined(__peos__)
++        if (found.source == "compiled-in")
++            if (fs::path media = peosMediaAssets(); !media.empty()) found = {media, "a disk (/mediaN)"};
++#endif
++        return found;
++    }();
+     return resolved;
+ }
+ 
+ const ResolvedDirectory& dataDirectory() {
+-    static const ResolvedDirectory resolved = resolveDirectory(
+-        "--data", kDataDirectoryVariable, LOLCLONE_SOURCE_DIR, executableDirectoryOrCurrent(), "scripts/items");
++    static const ResolvedDirectory resolved = [] {
++        ResolvedDirectory found = resolveDirectory(
++            "--data", kDataDirectoryVariable, LOLCLONE_SOURCE_DIR, executableDirectoryOrCurrent(), "scripts/items");
++#if defined(__peos__)
++        // PeOS: Rift Ascend's own files (scripts, its assets) on the game's
++        // disk beside league-assets, as rift-data (a live system's root holds
++        // at most 1024 files: they do not fit in the app's bundle there)
++        if (found.source == "compiled-in") {
++            std::error_code error;
++            for (int n = 1; n <= 9; ++n) {
++                const fs::path candidate = fs::path("/media" + std::to_string(n)) / "rift-data";
++                if (fs::exists(candidate / "scripts/items", error)) {
++                    found = {candidate, "a disk (/mediaN)"};
++                    break;
++                }
++            }
++        }
++#endif
++        return found;
++    }();
+     return resolved;
+ }
+ 
+@@ -141,6 +192,10 @@ fs::path executablePath() {
+     wchar_t path[32768];
+     const DWORD length = GetModuleFileNameW(nullptr, path, DWORD(std::size(path)));
+     return length > 0 && length < std::size(path) ? fs::path(std::wstring(path, length)) : fs::path();
++#elif defined(__peos__)
++    // argv[0] when it is a whole path (a Starlight app: its bundle's app.bin)
++    if (__peos_argc > 0 && __peos_argv[0] && __peos_argv[0][0] == '/') return fs::path(__peos_argv[0]);
++    return {};
+ #else
+     std::error_code error;
+     fs::path path = fs::read_symlink("/proc/self/exe", error);
+@@ -158,8 +213,12 @@ fs::path userDataDirectory() {
+     if (const char* xdg_data_home = std::getenv("XDG_DATA_HOME"); xdg_data_home && *xdg_data_home == '/')
+         return fs::path(xdg_data_home);
+     if (const char* home = std::getenv("HOME"); home && *home) return fs::path(home) / ".local" / "share";
++#if defined(__peos__)
++    return fs::path("/starlight/config");   // PeOS: the apps' settings
++#else
+     return {};
+ #endif
++#endif
+ }
+ 
+ }

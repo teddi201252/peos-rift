@@ -1,0 +1,44 @@
+From: PeOS
+Subject: [PATCH] client: start over the snapshots at the match start
+
+The server resets its game time when the match starts; a snapshot from the
+lobby (the server's clock, minutes) made every later one look old and the
+client dropped them all: the world stayed frozen. Cleared at OP_MATCH_START
+as after a reconnect, and a time far behind is taken as a restarted clock.
+---
+--- a/src/client/network/netclient.cpp
++++ b/src/client/network/netclient.cpp
+@@ -334,6 +334,17 @@
+         }
+         case net::OP_MATCH_START: {
+             LOG_INFO(logging::Category::Net, "match start: tick {} Hz, snapshot {} Hz", reader.u8(), reader.u8());
++            // PeOS: the server resets its game time at the match start
++            // (world.resetGameTime). A snapshot from before (the lobby's
++            // clock, minutes when the server ran long) made every later one
++            // look old: all dropped, the world frozen. Start over, as after
++            // a reconnect.
++            if (!snaps_.empty())
++                LOG_INFO(logging::Category::Net, "match start: {} snapshots from before dropped (server at {} ms)",
++                         snaps_.size(), snaps_.back().server_ms);
++            snaps_.clear();
++            clock_.reset();
++            local_entity_clock_.reset();
+             break;
+         }
+         case net::OP_SNAPSHOT: {
+@@ -394,6 +405,15 @@
+                 break;
+             }
+ 
++            // PeOS: a time far behind the last one is the server's clock
++            // starting over, not an old snapshot: start over with it.
++            if (!snaps_.empty() && snapshot.server_ms + 5000u < snaps_.back().server_ms) {
++                LOG_WARN(logging::Category::Net, "snapshot time went back from {} to {} ms: the server's clock restarted",
++                         snaps_.back().server_ms, snapshot.server_ms);
++                snaps_.clear();
++                clock_.reset();
++                local_entity_clock_.reset();
++            }
+             if (!snaps_.empty() && snapshot.server_ms <= snaps_.back().server_ms) break;
+             snaps_.push_back(std::move(snapshot));
+             while (snaps_.size() > kHistory) snaps_.pop_front();

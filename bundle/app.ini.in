@@ -1,0 +1,30 @@
+# Starlight app bundle: Rift Ascend's client, the PeOS port
+# (userland/ports/rift, docs/rift-ascend-port-plan.md). build.sh app writes
+# app.ini from this, @ARGS@ replaced.
+# gpu: OpenGL 4.5 on the Intel GPU (Mesa iris); shm: the window's pixels;
+# paths: at most 8 (PEOS_PATH_MAX_GRANTS; with more Starlight drops the
+# whole bundle, 2026-11-14): the bundle in /system/apps or in /apps (copied
+# there on an installed PeOS), /rift on the system's disk (the game's files
+# there as XPA archives) and /media1 ... /media4.
+# fs.read: on the game's disk the user's game files
+# (league-assets) and Rift Ascend's own data (rift-data, build.sh data:
+# 2000 files, more than a live root holds); fs.write: its settings
+# and logs in /starlight/config; audio: its sounds, mixed by the kernel;
+# network: the game server (ENet over UDP, through netd).
+title=Rift Ascend
+version=0.1.0
+author=Rift Ascend (GPL-3.0), ported by PeOS
+category=svago
+exec=./app.bin
+args=@ARGS@
+capabilities=gpu, fs.read, fs.write, shm, audio, network
+paths=/system/apps/rift.app:r, /apps/rift.app:r, /rift:r, /media1:r, /media2:r, /media3:r, /media4:r, /starlight/config:rw
+icon=res:icon
+width=1280
+height=720
+min_width=800
+min_height=600
+
+# Resources
+[resources]
+icon=./resources/icon.png

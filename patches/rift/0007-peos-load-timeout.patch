@@ -1,0 +1,21 @@
+--- a/src/server/runtime/network/network_events.h
++++ b/src/server/runtime/network/network_events.h
+@@ -74,7 +74,17 @@
+                 LOG_INFO(logging::Category::Match, "LAN connection from {}: practice tool {}", peer_instruction_pointer,
+                          clients[event.peer].practice_allowed ? "yes" : "no");
+             }
+-            enet_peer_timeout(event.peer, 0, 60000, 180000);
++            {
++                // RIFT_LOAD_TIMEOUT_S (the PeOS port's tests): a client still
++                // loading may be silent this long. On the MacBook with the game
++                // on a USB stick one step of the loading took 271 s, past the
++                // 180 s of the default (2026-11-14).
++                uint32_t silent_max = 180000;
++                if (const char* load_timeout = std::getenv("RIFT_LOAD_TIMEOUT_S"))
++                    if (const long seconds = std::strtol(load_timeout, nullptr, 10); seconds > 180 && seconds < 86400)
++                        silent_max = uint32_t(seconds) * 1000u;
++                enet_peer_timeout(event.peer, 0, silent_max == 180000 ? 60000 : silent_max, silent_max);
++            }
+             enet_peer_throttle_configure(event.peer, 5000, 0, 0);
+             LOG_INFO(logging::Category::Net, "peer connected ({} active)", clients.size());
+             break;

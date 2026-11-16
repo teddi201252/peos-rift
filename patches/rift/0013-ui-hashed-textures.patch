@@ -1,0 +1,107 @@
+A layout TextureName that is a WAD path hash (fmt::wad_link_key, "#<hash>")
+and no .ltk atlas has: the file whose path has that xxh64, from the named
+WADs (UI, Global, Common, Map11, Map12, DATA), loaded as its own texture.
+The HUD's panels (player frame, ability bar, shop) are such files in the
+newer data: drawn as nothing before. The first misses go to stderr.
+
+--- a/src/renderNew/ui.h
++++ b/src/renderNew/ui.h
+@@ -92,6 +92,12 @@
+     template <class Visitor>
+     bool findFile(const std::string& asset_path, Visitor&& visit) const;
+     mutable std::vector<Root> rootNodes_;
++    // "#<hash>" (a layout's TextureName as a WAD path hash, fmt::wad_link_key)
++    // -> the file: xxh64 of each path in the named WADs, made when first asked.
++    std::filesystem::path hashedFile(const std::string& key);
++    size_t named_roots_ = 0;
++    bool hashed_ready_ = false;
++    std::unordered_map<uint64_t, std::filesystem::path> hashed_;
+     std::vector<Texture> owned_;
+     size_t loaded_ = 0, missing_ = 0;
+     std::vector<std::string> missing_names_;
+--- a/src/renderNew/ui.cpp
++++ b/src/renderNew/ui.cpp
+@@ -4,6 +4,7 @@
+ #include <algorithm>
+ #include <cmath>
+ #include <cstdio>
++#include <cstdlib>
+ 
+ #include "core/prof.h"
+ #include "core/paths.h"
+@@ -18,6 +19,8 @@
+ #define STBI_ONLY_JPEG
+ #define STBI_NO_STDIO
+ #include <stb_image.h>
++#define XXH_INLINE_ALL
++#include <xxhash.h>
+ 
+ namespace fs = std::filesystem;
+ 
+@@ -205,6 +208,7 @@
+         const fs::path wadPath = assets_ / wad;
+         if (fmt::vfs::is_directory(wadPath)) roots_.push_back(wadPath);
+     }
++    named_roots_ = roots_.size();
+     for (const fs::path& wadDirectory : fmt::vfs::wad_directories(assets_))
+         if (std::find(roots_.begin(), roots_.end(), wadDirectory) == roots_.end()) roots_.push_back(wadDirectory);
+     roots_.push_back(assets_);
+@@ -328,9 +332,47 @@
+     return textureId;
+ }
+ 
++std::filesystem::path UiTextures::hashedFile(const std::string& key) {
++    if (!hashed_ready_) {
++        hashed_ready_ = true;
++        size_t files = 0;
++        for (size_t root = 0; root < named_roots_; ++root) {
++            const std::string prefix = roots_[root].generic_string() + "/";
++            for (const fmt::vfs::Item& item : fmt::vfs::list(roots_[root], true)) {
++                if (item.is_directory()) continue;
++                const std::string full = item.path().generic_string();
++                if (full.compare(0, prefix.size(), prefix) != 0) continue;
++                const std::string relative = lowercase(full.substr(prefix.size()));
++                hashed_.emplace(XXH64(relative.data(), relative.size(), 0), item.path());
++                ++files;
++            }
++        }
++        std::fprintf(stderr, "ui textures: %zu files by path hash, from %zu WADs\n", files, named_roots_);
++    }
++    const uint64_t hash = std::strtoull(key.c_str() + 1, nullptr, 16);
++    const auto found = hashed_.find(hash);
++    return found == hashed_.end() ? std::filesystem::path() : found->second;
++}
++
+ GLuint UiTextures::get(const std::string& asset_path) {
+     if (asset_path.empty()) return 0;
+     if (const auto found = cache_.find(asset_path); found != cache_.end()) return found->second;
++    if (asset_path[0] == '#') {
++        // A WAD path hash: the file it names, as its own path (cached under both)
++        const std::filesystem::path file = hashedFile(asset_path);
++        const GLuint texture = file.empty() ? 0 : get(file.generic_string());
++        if (!texture) {
++            static int said = 0;
++            if (said++ < 8)
++                std::fprintf(stderr, "ui textures: %s %s\n", asset_path.c_str(),
++                             file.empty() ? "is no file of the WADs" : ("did not load: " + file.generic_string()).c_str());
++            ++missing_;
++            if (missing_names_.size() < 32) missing_names_.push_back(asset_path);
++        }
++        cache_.emplace(asset_path, texture);
++        if (texture) size_[asset_path] = size(file.generic_string());
++        return texture;
++    }
+ 
+     PROF_COUNT(Textures, 1);
+ 
+--- a/src/client/ui/hud/hud.cpp
++++ b/src/client/ui/hud/hud.cpp
+@@ -1675,7 +1675,7 @@
+             return texture;
+         }
+     }
+-    if (key[0] == '#') return 0;   // a file hash (newer layouts) no atlas has: not a path to load
++    if (key[0] == '#') return tex_->get(key);   // a file hash no atlas has: the file it names
+     return tex_->get(path);
+ }
+ 

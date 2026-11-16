@@ -1,0 +1,105 @@
+diff --git a/src/audio/mixer.cpp b/src/audio/mixer.cpp
+index 6e720c9..b020d4e 100644
+--- a/src/audio/mixer.cpp
++++ b/src/audio/mixer.cpp
+@@ -13,6 +13,29 @@
+ 
+ #include <algorithm>
+ 
++#if defined(__peos__)
++// PeOS: no miniaudio device. A stream of PeOS's audio (peos_audio_open: 48
++// kHz, stereo, 16-bit; the kernel sums every program's) fed by a thread of
++// the mixer; the write waits for the device, so it is the clock.
++#include <peos/peos.h>
++
++#include <atomic>
++#include <chrono>
++#include <cmath>
++#include <thread>
++#include <vector>
++
++namespace {
++struct PeosOutput {
++    int64_t fd = -1;
++    std::atomic<bool> stop{false};
++    std::thread thread;
++};
++constexpr uint32_t kPeosRate = 48000;
++constexpr uint32_t kPeosPeriod = 1024;   // frames a write: ~21 ms
++}
++#endif
++
+ namespace audio::mixer {
+ 
+ namespace {
+@@ -134,10 +157,19 @@ void SourceVoice::mixInto(float* output, uint32_t frames) {
+ }
+ 
+ Mixer::~Mixer() {
++#if defined(__peos__)
++    if (auto* out = static_cast<PeosOutput*>(device_)) {
++        out->stop.store(true);
++        if (out->thread.joinable()) out->thread.join();
++        peos_fclose(uint64_t(out->fd));
++        delete out;
++    }
++#else
+     if (device_) {
+         ma_device_uninit(static_cast<ma_device*>(device_));
+         delete static_cast<ma_device*>(device_);
+     }
++#endif
+     for (SourceVoice* voice : voices_) delete voice;
+ }
+ 
+@@ -156,6 +188,42 @@ void Mixer::mix(float* output, uint32_t frames) {
+ }
+ 
+ bool Mixer::start(std::string& error) {
++#if defined(__peos__)
++    const int64_t fd = peos_audio_open();
++    if (fd < 0) {
++        error = "peos_audio_open: no audio device (or no \"audio\" capability)";
++        return false;
++    }
++    auto* out = new PeosOutput();
++    out->fd = fd;
++    output_rate_ = kPeosRate;
++    device_ = out;
++    out->thread = std::thread([this, out] {
++        std::vector<float> mixed(size_t(kPeosPeriod) * 2);
++        std::vector<int16_t> pcm(mixed.size());
++        while (!out->stop.load(std::memory_order_relaxed)) {
++            bool playing = false;
++            {
++                std::lock_guard<std::mutex> lock(mutex_);
++                for (const SourceVoice* voice : voices_)
++                    if (voice->playing_) {
++                        playing = true;
++                        break;
++                    }
++            }
++            if (!playing) {   // nothing to play: no silence sent, the device rests
++                std::this_thread::sleep_for(std::chrono::milliseconds(5));
++                continue;
++            }
++            mix(mixed.data(), kPeosPeriod);
++            for (size_t i = 0; i < mixed.size(); ++i)
++                pcm[i] = int16_t(std::lrint(std::clamp(mixed[i], -1.f, 1.f) * 32767.f));
++            const size_t bytes = pcm.size() * sizeof(int16_t);
++            if (peos_fwrite(uint64_t(out->fd), pcm.data(), bytes) != bytes) break;   // the device went
++        }
++    });
++    return true;
++#else
+     auto* device = new ma_device();
+     ma_device_config config = ma_device_config_init(ma_device_type_playback);
+     config.playback.format = ma_format_f32;
+@@ -179,6 +247,7 @@ bool Mixer::start(std::string& error) {
+     }
+     device_ = device;
+     return true;
++#endif
+ }
+ 
+ void Mixer::setMasterVolume(float volume) {

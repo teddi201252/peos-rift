@@ -1,0 +1,16 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1051,6 +1051,13 @@
+ endif()
+ endif()
+ 
++# The PeOS port: xpapack (the game's files into XPA archives) from its own
++# source, without the internal tools the published tree leaves out.
++if(NOT RIFT_WITH_TOOLS AND EXISTS "${CMAKE_SOURCE_DIR}/tools/xpapack/main.cpp")
++add_executable(xpapack tools/xpapack/main.cpp)
++target_link_libraries(xpapack PRIVATE fmt)
++endif()
++
+ if(RIFT_WITH_TOOLS)
+ add_executable(wemdump tools/wemdump/main.cpp)
+ target_link_libraries(wemdump PRIVATE fmt audio)
