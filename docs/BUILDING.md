@@ -1,15 +1,23 @@
 # Building rift.app and playing a match
 
 Everything runs on Linux (WSL on Windows works) or macOS, with the
-commands of `build.sh`. It builds **with a PeOS checkout**: the x86_64-peos
+commands of `build.sh`. It builds **with PeOS's tree**: the x86_64-peos
 toolchain and the ports Rift Ascend needs (Mesa, OpenSSL, FreeType) come
-from there, not yet from the Starlight App Kit's SDK.
+from there.
+
+**PeOS's own repository is private, and stays private.** What is public:
+PeOS's C library and its headers, in the
+[Starlight App Kit](https://github.com/teddi201252/starlight-app-kit)
+(`sdk/`), and the toolchain's recipe (in
+[peos-d2d](https://github.com/teddi201252/peos-d2d), `toolchain/`). The
+ported libraries Rift Ascend links are planned to come with the kit ("the
+ports' SDK"). Until they do, this build needs PeOS's private tree, and
+this repository is to read: how Rift Ascend's client becomes a PeOS app.
 
 ## 1. PeOS and its ports
 
 ```bash
-git clone https://github.com/teddi201252/peos
-cd peos
+cd peos                                  # PeOS's tree
 tools/peos-toolchain/build.sh            # the x86_64-peos cross compiler
 bash userland/ports/mesa/build.sh all    # Mesa (iris) into the sysroot
 bash userland/ports/openssl/build.sh all
